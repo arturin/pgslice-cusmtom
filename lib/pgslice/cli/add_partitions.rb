@@ -13,7 +13,10 @@ module PgSlice
 
       future = options[:future]
       past = options[:past]
-      range = (-1 * past)..future
+      range = ((-1 * past)..future).to_a
+      range.delete(0) # delete current month, keep current month in DEFAULT PARTITION
+      raw_today = Time.now.utc.to_date
+      range.delete(-1) if raw_today.day < 14 # delete previous month partition if less than 14 days passed in current month
 
       period, field, cast, needs_comment, declarative, version = table.fetch_settings(original_table.trigger_name)
       unless period
@@ -29,7 +32,7 @@ module PgSlice
       end
 
       # today = utc date
-      today = round_date(Time.now.utc.to_date, period)
+      today = round_date(raw_today, period)
 
       schema_table =
         if !declarative
@@ -61,13 +64,13 @@ module PgSlice
 
         if declarative
           queries << <<-SQL
-CREATE TABLE #{quote_table(partition)} PARTITION OF #{quote_table(table)} FOR VALUES FROM (#{sql_date(day, cast, false)}) TO (#{sql_date(advance_date(day, period, 1), cast, false)});
+            CREATE TABLE #{quote_table(partition)} PARTITION OF #{quote_table(table)} FOR VALUES FROM (#{sql_date(day, cast, false)}) TO (#{sql_date(advance_date(day, period, 1), cast, false)});
           SQL
         else
           queries << <<-SQL
-CREATE TABLE #{quote_table(partition)}
-    (CHECK (#{quote_ident(field)} >= #{sql_date(day, cast)} AND #{quote_ident(field)} < #{sql_date(advance_date(day, period, 1), cast)}))
-    INHERITS (#{quote_table(table)});
+            CREATE TABLE #{quote_table(partition)}
+            (CHECK (#{quote_ident(field)} >= #{sql_date(day, cast)} AND #{quote_ident(field)} < #{sql_date(advance_date(day, period, 1), cast)}))
+            INHERITS (#{quote_table(table)});
           SQL
         end
 
@@ -110,19 +113,27 @@ CREATE TABLE #{quote_table(partition)}
 
         if trigger_defs.any?
           queries << <<-SQL
-CREATE OR REPLACE FUNCTION #{quote_ident(trigger_name)}()
-    RETURNS trigger AS $$
-    BEGIN
-        IF #{trigger_defs.join("\n        ELSIF ")}
-        ELSE
-            RAISE EXCEPTION 'Date out of range. Ensure partitions are created.';
-        END IF;
-        RETURN NULL;
-    END;
-    $$ LANGUAGE plpgsql;
+            CREATE OR REPLACE FUNCTION #{quote_ident(trigger_name)}()
+            RETURNS trigger AS $$
+            BEGIN
+              IF #{trigger_defs.join("\n        ELSIF ")}
+              ELSE
+              RAISE EXCEPTION 'Date out of range. Ensure partitions are created.';
+              END IF;
+            RETURN NULL;
+            END;
+            $$ LANGUAGE plpgsql;
           SQL
         end
       end
+
+      queries << <<-SQL
+        CREATE TABLE IF NOT EXISTS "public"."#{original_table.name}_default" PARTITION OF #{quote_table(table)} DEFAULT;
+      SQL
+
+      queries << <<-SQL
+        ALTER TABLE "public"."#{original_table.name}_default" ADD PRIMARY KEY ("id");
+      SQL
 
       run_queries(queries) if queries.any?
     end
