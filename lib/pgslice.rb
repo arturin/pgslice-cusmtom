@@ -18,3 +18,5 @@ require "pgslice/cli/prep"
 require "pgslice/cli/swap"
 require "pgslice/cli/unprep"
 require "pgslice/cli/unswap"
+# custom command
+require "pgslice/cli/slice_default_partition"

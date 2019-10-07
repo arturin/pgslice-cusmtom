@@ -30,15 +30,21 @@ module PgSlice
         name_format = self.name_format(period)
 
         partitions = dest_table.partitions
+
         if partitions.any?
           starting_time = partition_date(partitions.first, name_format)
-          ending_time = advance_date(partition_date(partitions[-2], name_format), period, 1)
+          ending_time =
+            if partitions.last.default_partition?
+              advance_date(Date.strptime(source_table.fetch_max(field)), period, 0)
+            else
+              advance_date(partition_date(partitions.last, name_format), period, 1)
+            end
         end
       end
 
       schema_table = period && declarative ? partitions[-2] : table
-
       primary_key = schema_table.primary_key[0]
+
       abort "No primary key" unless primary_key
 
       max_source_id = nil

@@ -19,6 +19,10 @@ module PgSlice
       execute("SELECT column_name FROM information_schema.columns WHERE table_schema = $1 AND table_name = $2", [schema, name]).map{ |r| r["column_name"] }
     end
 
+    def default_partition?
+      self.name.split("_").last == 'default'
+    end
+
     # http://www.dbforums.com/showthread.php?1667561-How-to-list-sequences-and-the-columns-by-SQL
     def sequences
       query = <<-SQL
@@ -71,6 +75,10 @@ module PgSlice
 
     def intermediate_table
       self.class.new(schema, "#{name}_intermediate")
+    end
+
+    def default_table
+      @default_table ||= self.class.new(schema, "#{name.sub('_intermediate', '')}_default")
     end
 
     def retired_table
@@ -127,6 +135,10 @@ module PgSlice
 
     def fetch_trigger(trigger_name)
       execute("SELECT obj_description(oid, 'pg_trigger') AS comment FROM pg_trigger WHERE tgname = $1 AND tgrelid = #{regclass}", [trigger_name])[0]
+    end
+
+    def fetch_max(col)
+      execute("SELECT MAX(#{col}) FROM #{quote_table}")[0]['max']
     end
 
     # legacy

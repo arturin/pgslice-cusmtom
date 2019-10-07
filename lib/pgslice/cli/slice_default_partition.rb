@@ -1,27 +1,22 @@
+# frozen_string_literal: true
+
 module PgSlice
   class CLI
-    desc "add_partitions TABLE", "Add partitions"
+    desc "slice_default_partition TABLE", "Slice out month from default partition if possible"
     option :intermediate, type: :boolean, default: false, desc: "Add to intermediate table"
     option :past, type: :numeric, default: 0, desc: "Number of past partitions to add"
-    option :future, type: :numeric, default: 0, desc: "Number of future partitions to add"
-    def add_partitions(table)
+
+    def slice_default_partition(table)
       original_table = create_table(table)
       table = options[:intermediate] ? original_table.intermediate_table : original_table
+      default_table = table.default_table
       trigger_name = original_table.trigger_name
-
-      assert_table(table)
-
-      future = options[:future]
-      past = options[:past]
-      range = ((-1 * past)..future).to_a
-      range.delete(0) # delete current month, keep current month in DEFAULT PARTITION
       raw_today = Time.now.utc.to_date
-      range.delete(-1) if raw_today.day < 14 # delete previous month partition if less than 14 days passed in current month
 
-      period, field, cast, needs_comment, declarative, version = table.fetch_settings(original_table.trigger_name)
+      period, field, cast, needs_comment, declarative, version = table.fetch_settings(table.trigger_name)
+
       unless period
         message = "No settings found: #{table}"
-        message = "#{message}\nDid you mean to use --intermediate?" unless options[:intermediate]
         abort message
       end
 
@@ -31,14 +26,11 @@ module PgSlice
         queries << "COMMENT ON TRIGGER #{quote_ident(trigger_name)} ON #{quote_table(table)} is 'column:#{field},period:#{period},cast:#{cast}';"
       end
 
-      # today = utc date
       today = round_date(raw_today, period)
 
       schema_table =
         if !declarative
           table
-        elsif options[:intermediate]
-          original_table
         else
           table.partitions.last
         end
@@ -55,6 +47,11 @@ module PgSlice
       primary_key = schema_table.primary_key
 
       added_partitions = []
+
+      past = options[:past]
+      range = ((-1 * past)..-1).to_a
+      range.delete(-1) if raw_today.day < 14
+
       range.each do |n|
         day = advance_date(today, period, n)
 
@@ -87,8 +84,6 @@ module PgSlice
 
       unless declarative
         # update trigger based on existing partitions
-        current_defs = []
-        future_defs = []
         past_defs = []
         name_format = self.name_format(period)
         partitions = (table.partitions + added_partitions).uniq(&:name).sort_by(&:name)
@@ -97,19 +92,15 @@ module PgSlice
           day = partition_date(partition, name_format)
 
           sql = "(NEW.#{quote_ident(field)} >= #{sql_date(day, cast)} AND NEW.#{quote_ident(field)} < #{sql_date(advance_date(day, period, 1), cast)}) THEN
-              INSERT INTO #{quote_table(partition)} VALUES (NEW.*);"
+            INSERT INTO #{quote_table(partition)} VALUES (NEW.*);"
 
           if day.to_date < today
             past_defs << sql
-          elsif advance_date(day, period, 1) < today
-            current_defs << sql
-          else
-            future_defs << sql
           end
         end
 
         # order by current period, future periods asc, past periods desc
-        trigger_defs = current_defs + future_defs + past_defs.reverse
+        trigger_defs = past_defs.reverse
 
         if trigger_defs.any?
           queries << <<-SQL
@@ -118,7 +109,7 @@ module PgSlice
             BEGIN
               IF #{trigger_defs.join("\n        ELSIF ")}
               ELSE
-              RAISE EXCEPTION 'Date out of range. Ensure partitions are created.';
+                RAISE EXCEPTION 'Date out of range. Ensure partitions are created.';
               END IF;
             RETURN NULL;
             END;
@@ -127,16 +118,59 @@ module PgSlice
         end
       end
 
-      queries << <<-SQL
-        CREATE TABLE IF NOT EXISTS "public"."#{original_table.name}_default" PARTITION OF #{quote_table(table)} DEFAULT;
-      SQL
+      # move entities from default partition to partition
+      if added_partitions.any?
+        name_format = self.name_format(period)
+        starting_time = partition_date(added_partitions.first, name_format)
+        ending_time = advance_date(partition_date(added_partitions.last, name_format), period, 1)
 
-      queries << <<-SQL
-        ALTER TABLE "public"."#{original_table.name}_default" ADD PRIMARY KEY ("id");
-      SQL
+        max_dest_id = table.partitions[-2].max_id(primary_key)
+        log_sql "max_dest_id: #{max_dest_id}"
+        max_source_id = default_table.max_id(primary_key)
+        log_sql "max_source_id: #{max_source_id}"
+        starting_id = max_dest_id
+        fields = table.columns.map { |c| quote_ident(c) }.join(", ")
+        batch_size = 10000
+        i = 1
+        batch_count = ((max_source_id - max_dest_id) / batch_size.to_f).ceil
+
+        if batch_count == 0
+          log_sql "/* nothing to fill */"
+        end
+
+        while starting_id < max_source_id
+          where = "#{quote_ident(primary_key)} > #{starting_id} AND #{quote_ident(primary_key)} <= #{starting_id + batch_size}"
+          if starting_time
+            where += " AND #{quote_ident(field)} >= #{sql_date(starting_time, cast)} AND #{quote_ident(field)} < #{sql_date(ending_time, cast)}"
+          end
+
+          queries << <<-SQL
+            /* #{i} of #{batch_count} */
+            INSERT INTO #{quote_table(table)} (#{fields})
+            SELECT #{fields} FROM #{quote_table(default_table)}
+            WHERE #{where}
+          SQL
+
+          queries << <<-SQL
+            DELETE FROM #{quote_table(default_table)}
+            WHERE #{where}
+          SQL
+
+          starting_id += batch_size
+          i += 1
+        end
+      end
 
       if queries.any?
-        # lock partitioned_table
+        if default_table.exists?
+          # detach default_table
+          queries.unshift("ALTER TABLE IF EXISTS #{table.quote_table} DETACH PARTITION #{default_table.quote_table};")
+          # attach default partition
+          queries << <<-SQL
+            ALTER TABLE IF EXISTS #{table.quote_table} ATTACH PARTITION #{default_table.quote_table} DEFAULT;
+          SQL
+        end
+
         queries.unshift("LOCK TABLE #{table.quote_table} IN ACCESS SHARE MODE;")
 
         run_queries(queries)
