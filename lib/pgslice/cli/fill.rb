@@ -35,7 +35,7 @@ module PgSlice
           starting_time = partition_date(partitions.first, name_format)
           ending_time =
             if partitions.last.default_partition?
-              advance_date(Date.strptime(source_table.fetch_max(field)), period, 0)
+              advance_date(Date.strptime(source_table.fetch_max(field)), period, 1)
             else
               advance_date(partition_date(partitions.last, name_format), period, 1)
             end
