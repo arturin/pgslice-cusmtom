@@ -4,6 +4,7 @@ module PgSlice
     option :intermediate, type: :boolean, default: false, desc: "Add to intermediate table"
     option :past, type: :numeric, default: 0, desc: "Number of past partitions to add"
     option :future, type: :numeric, default: 0, desc: "Number of future partitions to add"
+    option :threshold, type: :numeric, default: 0, desc: "Date after which partition for previous month can be created"
     def add_partitions(table)
       original_table = create_table(table)
       table = options[:intermediate] ? original_table.intermediate_table : original_table
@@ -16,7 +17,7 @@ module PgSlice
       range = ((-1 * past)..future).to_a
       range.delete(0) # delete current month, keep current month in DEFAULT PARTITION
       raw_today = Time.now.utc.to_date
-      range.delete(-1) if raw_today.day < 14 # delete previous month partition if less than 14 days passed in current month
+      range.delete(-1) if raw_today.day < options[:threshold] # delete previous month partition if less than 14 days passed in current month
 
       period, field, cast, needs_comment, declarative, version = table.fetch_settings(original_table.trigger_name)
       unless period

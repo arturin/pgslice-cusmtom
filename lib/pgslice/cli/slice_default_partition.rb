@@ -5,7 +5,7 @@ module PgSlice
     desc "slice_default_partition TABLE", "Slice out month from default partition if possible"
     option :intermediate, type: :boolean, default: false, desc: "Add to intermediate table"
     option :past, type: :numeric, default: 0, desc: "Number of past partitions to add"
-
+    option :threshold, type: :numeric, default: 0, desc: "Date after which partition for previous month can be created"
     def slice_default_partition(table)
       original_table = create_table(table)
       table = options[:intermediate] ? original_table.intermediate_table : original_table
@@ -50,7 +50,7 @@ module PgSlice
 
       past = options[:past]
       range = ((-1 * past)..-1).to_a
-      range.delete(-1) if raw_today.day < 14
+      range.delete(-1) if raw_today.day < options[:threshold] # do not account previous month partition if less than n days passed in current month
 
       range.each do |n|
         day = advance_date(today, period, n)
