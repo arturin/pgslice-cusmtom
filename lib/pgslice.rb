@@ -3,6 +3,7 @@ require "cgi"
 require "pg"
 require "thor"
 require "time"
+require "uri"
 
 # modules
 require "pgslice/helpers"
